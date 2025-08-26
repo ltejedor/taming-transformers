@@ -14,7 +14,8 @@ import logging
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from transformers import top_k_top_p_filtering
+from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsWarper
+
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,14 @@ def sample_with_past(x, model, steps, temperature=1., sample_logits=True,
     sample = x
     cond_len = x.shape[1]
     past = None
+
+    # build warpers once, reuse every step
+    warpers = []
+    if top_k is not None:
+        warpers.append(TopKLogitsWarper(top_k=top_k))
+    if top_p is not None and top_p < 1.0:
+        warpers.append(TopPLogitsWarper(top_p=top_p))
+
     for n in range(steps):
         if callback is not None:
             callback(n)
@@ -335,20 +344,28 @@ def sample_with_past(x, model, steps, temperature=1., sample_logits=True,
             past = [present]
         else:
             past.append(present)
+
+        # pluck last-step logits and scale by temperature
         logits = logits[:, -1, :] / temperature
-        if top_k is not None:
-            logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
+
+        # apply warpers; pass the running sequence (sample) as input_ids
+        for w in warpers:
+            logits = w(sample, logits)
 
         probs = F.softmax(logits, dim=-1)
+
         if not sample_logits:
             _, x = torch.topk(probs, k=1, dim=-1)
         else:
             x = torch.multinomial(probs, num_samples=1)
+
         # append to the sequence and continue
         sample = torch.cat((sample, x), dim=1)
+
     del past
     sample = sample[:, cond_len:]  # cut conditioning off
     return sample
+
 
 
 #### clustering utils
